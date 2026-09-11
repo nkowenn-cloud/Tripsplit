@@ -107,6 +107,14 @@
   details>summary::before{content:"▸ ";display:inline-block;transition:transform .15s}
   details[open]>summary::before{content:"▾ "}
 
+  .banner{background:var(--amber-soft);border-radius:16px;padding:1.1rem 1.25rem;display:flex;flex-wrap:wrap;align-items:center;gap:.75rem;box-shadow:0 1px 2px rgba(21,48,58,.06)}
+  .banner p{margin:0;flex:1 1 240px}
+  .banner b{font-family:"Prompt"}
+  .banner .acts{display:flex;gap:.5rem;flex-wrap:wrap}
+  .banner button.ghost{background:#fff}
+  .linkbox{margin-top:.8rem;display:flex;gap:.5rem;flex-wrap:wrap}
+  .linkbox input{flex:1 1 200px;font-size:.85rem;color:var(--muted)}
+
   @media (max-width:600px){ .hidemob{display:none} section{padding:1.05rem} header h1{font-size:1.4rem} .total b{font-size:1.6rem} }
   @media (prefers-reduced-motion:reduce){ *{animation:none!important;transition:none!important} html{scroll-behavior:auto} }
 </style>
@@ -127,6 +135,7 @@
 </div></header>
 
 <main>
+  <div id="banner"></div>
   <section>
     <h2>ทริป</h2>
     <div class="row">
@@ -307,6 +316,72 @@ function importJSON(input){
   }catch{ alert('ไฟล์นี้อ่านไม่ได้ ต้องเป็นไฟล์สำรองจาก TripSplit'); } };
   r.readAsText(f); input.value='';
 }
+/* ---------- share by link (trip data is packed into the URL hash) ---------- */
+const b64u = {
+  enc(bytes){ let s=''; for(let i=0;i<bytes.length;i+=0x8000) s+=String.fromCharCode(...bytes.subarray(i,i+0x8000));
+    return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); },
+  dec(str){ const s=str.replace(/-/g,'+').replace(/_/g,'/'); return Uint8Array.from(atob(s),c=>c.charCodeAt(0)); }
+};
+async function pack(obj){
+  const data=new TextEncoder().encode(JSON.stringify(obj));
+  if(!window.CompressionStream) return 'r'+b64u.enc(data);
+  const cs=new Blob([data]).stream().pipeThrough(new CompressionStream('deflate-raw'));
+  return 'z'+b64u.enc(new Uint8Array(await new Response(cs).arrayBuffer()));
+}
+async function unpack(str){
+  const bytes=b64u.dec(str.slice(1));
+  if(str[0]==='r') return JSON.parse(new TextDecoder().decode(bytes));
+  const ds=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return JSON.parse(await new Response(ds).text());
+}
+async function shareTrip(){
+  const t=cur(); if(!t) return;
+  if(!t.expenses.length && !t.members.length) return alert('ทริปยังว่างอยู่ ใส่เพื่อนหรือรายการก่อน');
+  const link=location.origin+location.pathname+'#t='+await pack({v:1,trip:t});
+  if(link.length>30000) return alert('ทริปนี้ใหญ่เกินจะใส่ในลิงก์ ใช้ปุ่มสำรองข้อมูลส่งไฟล์ .json แทน');
+  const done=()=>renderShare(link);
+  if(navigator.share){ try{ await navigator.share({title:`ทริป ${t.name}`,url:link}); }catch{} done(); return; }
+  try{ await navigator.clipboard.writeText(link); alert('คัดลอกลิงก์แล้ว ส่งให้เพื่อนในไลน์ได้เลย'); }catch{}
+  done();
+}
+function renderShare(link){
+  $('banner').innerHTML=`<div class="banner"><div style="flex:1 1 100%">
+    <p><b>ลิงก์ทริปพร้อมแล้ว</b> — ส่งให้เพื่อนได้เลย ข้อมูลอยู่ในตัวลิงก์ ไม่ได้ขึ้น server</p>
+    <div class="linkbox"><input value="${esc(link)}" readonly onclick="this.select()">
+      <button onclick="navigator.clipboard.writeText(this.previousElementSibling.value);this.textContent='คัดลอกแล้ว'">คัดลอก</button>
+      <button class="ghost" onclick="$('banner').innerHTML=''">ปิด</button></div>
+    <p class="hint">ลิงก์นี้เป็นภาพนิ่ง ณ ตอนนี้ ถ้าลงรายการเพิ่มต้องกดแชร์ใหม่</p>
+  </div></div>`;
+  $('banner').scrollIntoView({block:'nearest'});
+}
+async function handleIncoming(){
+  const m=location.hash.match(/^#t=(.+)$/); if(!m) return;
+  history.replaceState(null,'',location.pathname);
+  let d; try{ d=await unpack(decodeURIComponent(m[1])); }catch{ return alert('ลิงก์นี้เสียหรือไม่สมบูรณ์ ลองให้เพื่อนส่งใหม่'); }
+  const nt=d?.trip; if(!nt?.id) return alert('ลิงก์นี้ไม่ใช่ลิงก์ทริป');
+  const exist=state.trips.find(x=>x.id===nt.id);
+  const label=`${esc(nt.name)} · ${nt.members?.length||0} คน · ${nt.expenses?.length||0} รายการ`;
+  $('banner').innerHTML=`<div class="banner">
+    <p><b>มีทริปส่งมาจากลิงก์</b><br>${label}${exist?`<br><span style="color:#8A6A22">คุณมีทริปนี้อยู่แล้ว การรับจะทับของเดิม</span>`:''}</p>
+    <div class="acts">
+      <button onclick="acceptShared()">${exist?'ทับของเดิม':'รับเข้ามา'}</button>
+      ${exist?'<button class="ghost" onclick="acceptShared(true)">เก็บเป็นทริปใหม่</button>':''}
+      <button class="ghost" onclick="$('banner').innerHTML='';window.__inbox=null">ไม่รับ</button>
+    </div></div>`;
+  window.__inbox=nt;
+}
+function acceptShared(asCopy){
+  const nt=window.__inbox; if(!nt) return;
+  nt.base = nt.base && CUR[nt.base] ? nt.base : 'THB';
+  nt.rates = nt.rates || {}; CODES.forEach(c=>{ if(typeof nt.rates[c]!=='number') nt.rates[c]=defaultRate(c,nt.base); });
+  nt.expenses = nt.expenses || []; nt.members = nt.members || [];
+  nt.expenses.forEach(e=>{ if(!e.cur) e.cur=nt.base; });
+  if(asCopy){ nt.id=uid(); nt.name=nt.name+' (สำเนา)'; }
+  const i=state.trips.findIndex(x=>x.id===nt.id);
+  i>=0 ? state.trips[i]=nt : state.trips.push(nt);
+  state.current=nt.id; window.__inbox=null; $('banner').innerHTML=''; save();
+}
+
 function copySummary(){
   const t=cur(), b=balances(t), name=id=>t.members.find(m=>m.id===id)?.name||'?';
   const total=t.expenses.reduce((s,e)=>s+inBase(t,e),0), st=settle(b);
@@ -331,7 +406,11 @@ function render(){
 
   area.innerHTML=`
   <section>
-    <h2>เพื่อนร่วมทริป «${esc(t.name)}» <button class="link" onclick="deleteTrip('${t.id}')">ลบทริปนี้</button></h2>
+    <h2>เพื่อนร่วมทริป «${esc(t.name)}»
+      <span style="display:flex;gap:.5rem;align-items:center">
+        <button class="ghost small" onclick="shareTrip()">แชร์ทริปเป็นลิงก์</button>
+        <button class="link" onclick="deleteTrip('${t.id}')">ลบทริปนี้</button>
+      </span></h2>
     <div class="row">
       <div style="grid-column:span 2"><label>ชื่อหรืออีเมล</label>
         <input id="mName" placeholder="เช่น ปอ หรือ por@mail.com" onkeydown="if(event.key==='Enter')addMember()"></div>
@@ -411,6 +490,8 @@ function render(){
   </section>`;
 }
 render();
+handleIncoming();
+addEventListener('hashchange',handleIncoming);
 </script>
 </body>
 </html>
