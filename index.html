@@ -107,6 +107,7 @@
   details>summary::before{content:"▸ ";display:inline-block;transition:transform .15s}
   details[open]>summary::before{content:"▾ "}
 
+  .live{font:500 .78rem/1 "Sarabun";color:var(--jade);background:var(--jade-soft);padding:.3rem .55rem;border-radius:99px;white-space:nowrap}
   .banner{background:var(--amber-soft);border-radius:16px;padding:1.1rem 1.25rem;display:flex;flex-wrap:wrap;align-items:center;gap:.75rem;box-shadow:0 1px 2px rgba(21,48,58,.06)}
   .banner p{margin:0;flex:1 1 240px}
   .banner b{font-family:"Prompt"}
@@ -184,7 +185,8 @@ function load(){
   });
   return s;
 }
-function save(){ try{ localStorage.setItem('tripsplit',JSON.stringify(state)); }catch{} render(); }
+function persist(){ try{ localStorage.setItem('tripsplit',JSON.stringify(state)); }catch{} }
+function save(){ persist(); render(); }
 const cur = () => state.trips.find(t=>t.id===state.current);
 const inBase = (t,e) => e.amount * (t.rates[e.cur] ?? defaultRate(e.cur,t.base));
 
@@ -196,31 +198,34 @@ function addTrip(){
   const t={id:uid(),name,base,rates,members:[],expenses:[],created:today()};
   state.trips.push(t); state.current=t.id; $('tripName').value=''; save();
 }
-const selectTrip = id => { state.current=id; save(); };
-function deleteTrip(id){
+const selectTrip = id => { state.current=id; save(); subscribe(); };
+async function deleteTrip(id){
   const t=state.trips.find(x=>x.id===id);
-  if(!confirm(`ลบทริป "${t.name}" และรายการทั้งหมด?`)) return;
+  const msg = t.cloud ? `ลบทริป "${t.name}" ออกจากคลาวด์ถาวร เพื่อนทุกคนจะเข้าไม่ได้อีก แน่ใจไหม`
+                      : `ลบทริป "${t.name}" และรายการทั้งหมด?`;
+  if(!confirm(msg)) return;
+  if(t.cloud){ unsubs.forEach(f=>{try{f()}catch{}}); unsubs=[]; try{ await dropTrip(t); }catch(e){ return cloudErr(e); } }
   state.trips=state.trips.filter(x=>x.id!==id);
-  if(state.current===id) state.current=state.trips[0]?.id||null; save();
+  if(state.current===id) state.current=state.trips[0]?.id||null; save(); subscribe();
 }
 function setRate(code,val){
   const t=cur(), v=parseFloat(val);
-  if(v>0) t.rates[code]=v; save();
+  if(v>0) t.rates[code]=v; pushTrip(t); save();
 }
 function resetRates(){
-  const t=cur(); CODES.forEach(c=>t.rates[c]=defaultRate(c,t.base)); t.rates[t.base]=1; save();
+  const t=cur(); CODES.forEach(c=>t.rates[c]=defaultRate(c,t.base)); t.rates[t.base]=1; pushTrip(t); save();
 }
 
 /* ---------- members ---------- */
 function addMember(){
   const t=cur(), name=$('mName').value.trim(); if(!name) return;
   if(t.members.some(m=>m.name.toLowerCase()===name.toLowerCase())) return alert('มีชื่อนี้ในทริปแล้ว');
-  t.members.push({id:uid(),name}); $('mName').value=''; save(); $('mName')?.focus();
+  t.members.push({id:uid(),name}); pushTrip(t); $('mName').value=''; save(); $('mName')?.focus();
 }
 function removeMember(id){
   const t=cur();
   if(t.expenses.some(e=>e.payer===id||e.among.includes(id))) return alert('คนนี้ยังอยู่ในรายการค่าใช้จ่าย ลบรายการนั้นก่อน');
-  t.members=t.members.filter(m=>m.id!==id); save();
+  t.members=t.members.filter(m=>m.id!==id); pushTrip(t); save();
 }
 
 /* ---------- expenses ---------- */
@@ -230,10 +235,11 @@ function addExpense(){
         payer=$('ePayer').value, date=$('eDate').value||today(), c=$('eCur').value;
   const among=[...document.querySelectorAll('.split input:checked')].map(x=>x.value);
   if(!desc||!(amount>0)||!payer||!among.length) return alert('ใส่รายการ จำนวนเงิน คนออก และเลือกคนหารอย่างน้อย 1 คน');
-  t.expenses.push({id:uid(),desc,amount,cur:c,payer,among,date});
+  const e={id:uid(),desc,amount,cur:c,payer,among,date};
+  t.expenses.push(e); pushExpense(t,e);
   $('eDesc').value=''; $('eAmt').value=''; save(); $('eDesc')?.focus();
 }
-function removeExpense(id){ const t=cur(); t.expenses=t.expenses.filter(e=>e.id!==id); save(); }
+function removeExpense(id){ const t=cur(); dropExpense(t,id); t.expenses=t.expenses.filter(e=>e.id!==id); save(); }
 
 /* ---------- math (everything settles in trip base currency) ---------- */
 function balances(t){
@@ -316,7 +322,78 @@ function importJSON(input){
   }catch{ alert('ไฟล์นี้อ่านไม่ได้ ต้องเป็นไฟล์สำรองจาก TripSplit'); } };
   r.readAsText(f); input.value='';
 }
-/* ---------- share by link (trip data is packed into the URL hash) ---------- */
+/* ---------- cloud sync (Firestore) ---------- */
+const rid = n => { const a=new Uint8Array(n); crypto.getRandomValues(a);
+  return [...a].map(x=>'abcdefghijkmnpqrstuvwxyz23456789'[x%32]).join(''); };
+const expFields = e => ({desc:e.desc,amount:e.amount,cur:e.cur,payer:e.payer,among:e.among,date:e.date});
+const tripFields = t => ({name:t.name,base:t.base,rates:t.rates,members:t.members,created:t.created||today()});
+const online = t => !!(t?.cloud && window.FB);
+
+let unsubs=[];
+function cloudErr(e){
+  console.error(e);
+  $('banner').innerHTML=`<div class="banner"><p><b>ต่อฐานข้อมูลไม่ได้</b><br>
+    <span style="font-size:.9rem">${esc(e?.code||e?.message||'ไม่ทราบสาเหตุ')} — ถ้าเป็น permission-denied แปลว่า Rules ใน Firebase หมดอายุหรือยังไม่ได้ตั้ง</span></p>
+    <div class="acts"><button class="ghost" onclick="$('banner').innerHTML=''">ปิด</button></div></div>`;
+}
+function pushTrip(t){ if(!online(t)) return;
+  FB.setDoc(FB.doc(FB.db,'trips',t.id),tripFields(t),{merge:true}).catch(cloudErr); }
+function pushExpense(t,e){ if(!online(t)) return;
+  FB.setDoc(FB.doc(FB.db,'trips',t.id,'expenses',e.id),expFields(e)).catch(cloudErr); }
+function dropExpense(t,id){ if(!online(t)) return;
+  FB.deleteDoc(FB.doc(FB.db,'trips',t.id,'expenses',id)).catch(cloudErr); }
+async function dropTrip(t){ if(!online(t)) return;
+  const snap=await FB.getDocs(FB.collection(FB.db,'trips',t.id,'expenses'));
+  await Promise.all(snap.docs.map(d=>FB.deleteDoc(d.ref)));
+  await FB.deleteDoc(FB.doc(FB.db,'trips',t.id)); }
+
+function subscribe(){
+  unsubs.forEach(f=>{try{f()}catch{}}); unsubs=[];
+  const t=cur(); if(!online(t)) return;
+  const {db,doc,collection,onSnapshot}=window.FB;
+  unsubs.push(onSnapshot(doc(db,'trips',t.id),s=>{
+    const tt=state.trips.find(x=>x.id===t.id); if(!tt) return;
+    if(!s.exists()){ tt.missing=true; render(); return; }
+    const d=s.data(); tt.missing=false;
+    Object.assign(tt,{name:d.name||tt.name,base:d.base||tt.base,rates:d.rates||tt.rates,members:d.members||[]});
+    persist(); render();
+  },cloudErr));
+  unsubs.push(onSnapshot(collection(db,'trips',t.id,'expenses'),s=>{
+    const tt=state.trips.find(x=>x.id===t.id); if(!tt) return;
+    tt.expenses=s.docs.map(d=>({id:d.id,...d.data()}));
+    tt.expenses.forEach(e=>{ if(!e.cur) e.cur=tt.base; });
+    persist(); render();
+  },cloudErr));
+}
+async function enableSync(){
+  const t=cur(); if(!t) return;
+  if(!window.FB) return alert('ยังต่อ Firebase ไม่ได้ ลองรีเฟรชหน้าหรือเช็คเน็ต');
+  if(t.cloud) return shareTrip();
+  if(!confirm('เปิดซิงค์ = อัปทริปนี้ขึ้นฐานข้อมูล ใครมีลิงก์จะลงรายการพร้อมกันได้ ทำต่อไหม')) return;
+  const newId=rid(22); t.id=newId; t.cloud=true; state.current=newId;
+  try{
+    await FB.setDoc(FB.doc(FB.db,'trips',newId),tripFields(t));
+    await Promise.all(t.expenses.map(e=>FB.setDoc(FB.doc(FB.db,'trips',newId,'expenses',e.id),expFields(e))));
+  }catch(e){ t.cloud=false; persist(); render(); return cloudErr(e); }
+  persist(); subscribe(); render(); shareTrip();
+}
+function joinTrip(id){
+  if(!window.FB) return alert('ยังต่อ Firebase ไม่ได้ ลองรีเฟรชหน้า');
+  if(!state.trips.some(x=>x.id===id)){
+    const rates={}; CODES.forEach(c=>rates[c]=defaultRate(c,'THB'));
+    state.trips.push({id,cloud:true,name:'กำลังโหลด…',base:'THB',rates,members:[],expenses:[],created:today()});
+  }
+  state.current=id; persist(); subscribe(); render(); $('banner').innerHTML='';
+}
+function leaveTrip(id){
+  if(!confirm('เอาทริปนี้ออกจากเครื่องนี้? (ข้อมูลบนคลาวด์ยังอยู่ เพื่อนยังใช้ได้ และกลับเข้าได้ด้วยลิงก์เดิม)')) return;
+  state.trips=state.trips.filter(x=>x.id!==id);
+  if(state.current===id) state.current=state.trips[0]?.id||null;
+  unsubs.forEach(f=>{try{f()}catch{}}); unsubs=[]; save(); subscribe();
+}
+addEventListener('fb-ready',()=>{ subscribe(); render(); if(window.__pendingJoin){ joinTrip(window.__pendingJoin); window.__pendingJoin=null; } });
+
+/* ---------- share by link ---------- */
 const b64u = {
   enc(bytes){ let s=''; for(let i=0;i<bytes.length;i+=0x8000) s+=String.fromCharCode(...bytes.subarray(i,i+0x8000));
     return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); },
@@ -336,25 +413,35 @@ async function unpack(str){
 }
 async function shareTrip(){
   const t=cur(); if(!t) return;
-  if(!t.expenses.length && !t.members.length) return alert('ทริปยังว่างอยู่ ใส่เพื่อนหรือรายการก่อน');
-  const link=location.origin+location.pathname+'#t='+await pack({v:1,trip:t});
-  if(link.length>30000) return alert('ทริปนี้ใหญ่เกินจะใส่ในลิงก์ ใช้ปุ่มสำรองข้อมูลส่งไฟล์ .json แทน');
-  const done=()=>renderShare(link);
+  let link;
+  if(t.cloud){ link=location.origin+location.pathname+'#j='+t.id; }
+  else{
+    if(!t.expenses.length && !t.members.length) return alert('ทริปยังว่างอยู่ ใส่เพื่อนหรือรายการก่อน');
+    link=location.origin+location.pathname+'#t='+await pack({v:1,trip:t});
+    if(link.length>30000) return alert('ทริปนี้ใหญ่เกินจะใส่ในลิงก์ เปิดซิงค์ หรือส่งไฟล์สำรอง .json แทน');
+  }
+  const done=()=>renderShare(link,t.cloud);
   if(navigator.share){ try{ await navigator.share({title:`ทริป ${t.name}`,url:link}); }catch{} done(); return; }
   try{ await navigator.clipboard.writeText(link); alert('คัดลอกลิงก์แล้ว ส่งให้เพื่อนในไลน์ได้เลย'); }catch{}
   done();
 }
-function renderShare(link){
+function renderShare(link,live){
   $('banner').innerHTML=`<div class="banner"><div style="flex:1 1 100%">
-    <p><b>ลิงก์ทริปพร้อมแล้ว</b> — ส่งให้เพื่อนได้เลย ข้อมูลอยู่ในตัวลิงก์ ไม่ได้ขึ้น server</p>
+    <p><b>ลิงก์ทริปพร้อมแล้ว</b> — ${live?'เพื่อนกดเข้ามาแล้วลงรายการได้เลย ทุกคนเห็นตรงกันแบบเรียลไทม์'
+      :'ข้อมูลอยู่ในตัวลิงก์ ไม่ได้ขึ้น server'}</p>
     <div class="linkbox"><input value="${esc(link)}" readonly onclick="this.select()">
       <button onclick="navigator.clipboard.writeText(this.previousElementSibling.value);this.textContent='คัดลอกแล้ว'">คัดลอก</button>
       <button class="ghost" onclick="$('banner').innerHTML=''">ปิด</button></div>
-    <p class="hint">ลิงก์นี้เป็นภาพนิ่ง ณ ตอนนี้ ถ้าลงรายการเพิ่มต้องกดแชร์ใหม่</p>
+    <p class="hint">${live?'ใครมีลิงก์นี้ก็เข้าดูและแก้ทริปได้ ส่งเฉพาะคนที่ไปด้วยกันนะ'
+      :'ลิงก์นี้เป็นภาพนิ่ง ณ ตอนนี้ ถ้าลงรายการเพิ่มต้องกดแชร์ใหม่'}</p>
   </div></div>`;
   $('banner').scrollIntoView({block:'nearest'});
 }
 async function handleIncoming(){
+  const j=location.hash.match(/^#j=([\w-]+)$/);
+  if(j){ history.replaceState(null,'',location.pathname);
+    if(window.FB) joinTrip(j[1]); else window.__pendingJoin=j[1];
+    return; }
   const m=location.hash.match(/^#t=(.+)$/); if(!m) return;
   history.replaceState(null,'',location.pathname);
   let d; try{ d=await unpack(decodeURIComponent(m[1])); }catch{ return alert('ลิงก์นี้เสียหรือไม่สมบูรณ์ ลองให้เพื่อนส่งใหม่'); }
@@ -395,7 +482,7 @@ $('tripCur').innerHTML = CODES.map(c=>`<option value="${c}"${c==='THB'?' selecte
 
 function render(){
   $('trips').innerHTML = state.trips.length
-    ? state.trips.map(t=>`<button class="${t.id===state.current?'on':''}" onclick="selectTrip('${t.id}')">${esc(t.name)}<span class="n">${t.base} · ${t.expenses.length}</span></button>`).join('')
+    ? state.trips.map(t=>`<button class="${t.id===state.current?'on':''}" onclick="selectTrip('${t.id}')">${esc(t.name)}<span class="n">${t.cloud?'☁ ':''}${t.base} · ${t.expenses.length}</span></button>`).join('')
     : '<div class="empty" style="flex:1">ยังไม่มีทริป ตั้งชื่อด้านบนแล้วกดสร้าง</div>';
 
   const t=cur(), area=$('tripArea');
@@ -406,11 +493,15 @@ function render(){
 
   area.innerHTML=`
   <section>
-    <h2>เพื่อนร่วมทริป «${esc(t.name)}»
-      <span style="display:flex;gap:.5rem;align-items:center">
-        <button class="ghost small" onclick="shareTrip()">แชร์ทริปเป็นลิงก์</button>
+    <h2>เพื่อนร่วมทริป «${esc(t.name)}» ${t.cloud?'<span class="live">● ซิงค์อยู่</span>':''}
+      <span style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
+        ${t.cloud? `<button class="ghost small" onclick="shareTrip()">ชวนเพื่อน</button>
+                    <button class="ghost small" onclick="leaveTrip('${t.id}')">เอาออกจากเครื่องนี้</button>`
+                 : `<button class="ghost small" onclick="enableSync()">เปิดซิงค์</button>
+                    <button class="ghost small" onclick="shareTrip()">แชร์เป็นลิงก์</button>`}
         <button class="link" onclick="deleteTrip('${t.id}')">ลบทริปนี้</button>
       </span></h2>
+    ${t.missing?'<div class="empty" style="margin-bottom:1rem;color:var(--coral)">ไม่เจอทริปนี้บนคลาวด์ — อาจถูกลบไปแล้ว</div>':''}
     <div class="row">
       <div style="grid-column:span 2"><label>ชื่อหรืออีเมล</label>
         <input id="mName" placeholder="เช่น ปอ หรือ por@mail.com" onkeydown="if(event.key==='Enter')addMember()"></div>
@@ -492,6 +583,28 @@ function render(){
 render();
 handleIncoming();
 addEventListener('hashchange',handleIncoming);
+</script>
+
+<script type="module">
+/* ===== Firebase — โปรเจกต์ tripsplitnuannuan ===== */
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.2.1/firebase-app.js';
+import { getFirestore, doc, collection, setDoc, deleteDoc, getDocs, onSnapshot }
+  from 'https://www.gstatic.com/firebasejs/12.2.1/firebase-firestore.js';
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDZtopdwnYTHZqC9RX6B6TjgUhgSYrt-lE",
+  authDomain: "tripsplitnuannuan.firebaseapp.com",
+  projectId: "tripsplitnuannuan",
+  storageBucket: "tripsplitnuannuan.firebasestorage.app",
+  messagingSenderId: "327210314789",
+  appId: "1:327210314789:web:001a8bea13c11c839b23cc"
+};
+
+try{
+  const app = initializeApp(firebaseConfig);
+  window.FB = { db:getFirestore(app), doc, collection, setDoc, deleteDoc, getDocs, onSnapshot };
+}catch(e){ console.error('Firebase init failed',e); }
+window.dispatchEvent(new Event('fb-ready'));
 </script>
 </body>
 </html>
