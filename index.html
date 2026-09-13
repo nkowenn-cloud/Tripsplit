@@ -165,6 +165,7 @@ const CUR = {
   EUR:{sym:'€',  name:'ยูโร',       perUSD:0.92,dp:2},
   GBP:{sym:'£',  name:'ปอนด์',      perUSD:0.78,dp:2},
   AUD:{sym:'A$', name:'ดอลลาร์ออส', perUSD:1.5, dp:2},
+  VND:{sym:'₫',  name:'ดอง',        perUSD:25400, dp:0},
 };
 const CODES = Object.keys(CUR);
 const defaultRate = (from,base) => CUR[base].perUSD / CUR[from].perUSD;
@@ -355,7 +356,9 @@ function subscribe(){
     const tt=state.trips.find(x=>x.id===t.id); if(!tt) return;
     if(!s.exists()){ tt.missing=true; render(); return; }
     const d=s.data(); tt.missing=false;
-    Object.assign(tt,{name:d.name||tt.name,base:d.base||tt.base,rates:d.rates||tt.rates,members:d.members||[]});
+    const rates={...tt.rates,...(d.rates||{})};
+    CODES.forEach(c=>{ if(typeof rates[c]!=='number') rates[c]=defaultRate(c,d.base||tt.base); });
+    Object.assign(tt,{name:d.name||tt.name,base:d.base||tt.base,rates,members:d.members||[]});
     persist(); render();
   },cloudErr));
   unsubs.push(onSnapshot(collection(db,'trips',t.id,'expenses'),s=>{
@@ -532,7 +535,7 @@ function render(){
       <div class="rates" style="margin-top:.8rem">
         ${CODES.filter(c=>c!==t.base).map(c=>`<div class="rate">
           <b>1 ${c}</b><span>=</span>
-          <input type="number" min="0" step="any" value="${t.rates[c]}" onchange="setRate('${c}',this.value)" aria-label="เรต ${c}">
+          <input type="number" min="0" step="any" value="${t.rates[c] ?? defaultRate(c,t.base)}" onchange="setRate('${c}',this.value)" aria-label="เรต ${c}">
           <span>${t.base}</span></div>`).join('')}
       </div>
       <p class="hint">เป็นเรตตั้งต้นแบบคร่าว ๆ ไม่ได้ดึงสด แก้ให้ตรงกับที่แลกจริงหรือเรตบัตรได้เลย
