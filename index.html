@@ -124,7 +124,7 @@
 <header><div class="wrap">
   <div>
     <h1>TripSplit</h1>
-    <p>ลงว่าใครออกเท่าไร แล้วให้มันหารให้ตอนจบทริป <span style="opacity:.6">· v7 (มี ₫ VND)</span></p>
+    <p>ลงว่าใครออกเท่าไร แล้วให้มันหารให้ตอนจบทริป <span style="opacity:.6">· v8 (แก้รายการได้)</span></p>
   </div>
   <div class="tools">
     <button onclick="exportCSV()">รายการ CSV</button>
@@ -207,7 +207,7 @@ function addTrip(){
   const t={id:uid(),name,base,rates,members:[],expenses:[],created:today()};
   state.trips.push(t); state.current=t.id; $('tripName').value=''; save();
 }
-const selectTrip = id => { state.current=id; save(); subscribe(); };
+const selectTrip = id => { state.current=id; editing=null; save(); subscribe(); };
 async function deleteTrip(id){
   const t=state.trips.find(x=>x.id===id);
   const msg = t.cloud ? `ลบทริป "${t.name}" ออกจากคลาวด์ถาวร เพื่อนทุกคนจะเข้าไม่ได้อีก แน่ใจไหม`
@@ -238,17 +238,26 @@ function removeMember(id){
 }
 
 /* ---------- expenses ---------- */
+let editing=null;
+function startEdit(id){ editing=id; render();
+  document.getElementById('expForm')?.scrollIntoView({block:'center'}); $('eDesc')?.focus(); }
+function cancelEdit(){ editing=null; render(); }
 function addExpense(){
   const t=cur();
   const desc=$('eDesc').value.trim(), amount=parseFloat($('eAmt').value),
         payer=$('ePayer').value, date=$('eDate').value||today(), c=$('eCur').value;
   const among=[...document.querySelectorAll('.split input:checked')].map(x=>x.value);
   if(!desc||!(amount>0)||!payer||!among.length) return alert('ใส่รายการ จำนวนเงิน คนออก และเลือกคนหารอย่างน้อย 1 คน');
+  if(editing){
+    const e=t.expenses.find(x=>x.id===editing);
+    if(e){ Object.assign(e,{desc,amount,cur:c,payer,among,date}); pushExpense(t,e); }
+    editing=null; save(); return;
+  }
   const e={id:uid(),desc,amount,cur:c,payer,among,date};
   t.expenses.push(e); pushExpense(t,e);
   $('eDesc').value=''; $('eAmt').value=''; save(); $('eDesc')?.focus();
 }
-function removeExpense(id){ const t=cur(); dropExpense(t,id); t.expenses=t.expenses.filter(e=>e.id!==id); save(); }
+function removeExpense(id){ const t=cur(); if(editing===id) editing=null; dropExpense(t,id); t.expenses=t.expenses.filter(e=>e.id!==id); save(); }
 
 /* ---------- math (everything settles in trip base currency) ---------- */
 function balances(t){
@@ -508,6 +517,8 @@ function render(){
   const name=id=>t.members.find(m=>m.id===id)?.name||'?';
   const b=balances(t), st=settle(b), total=t.expenses.reduce((s,e)=>s+inBase(t,e),0);
   const maxPaid=Math.max(1,...t.members.map(m=>t.expenses.filter(e=>e.payer===m.id).reduce((s,e)=>s+inBase(t,e),0)));
+  const ed = editing ? t.expenses.find(x=>x.id===editing) : null;
+  if(editing && !ed) editing=null;
 
   area.innerHTML=`
   <section>
@@ -532,18 +543,20 @@ function render(){
   </section>
 
   <section>
-    <h2>ลงค่าใช้จ่าย</h2>
+    <h2 id="expForm">${ed?'แก้ไขรายการ':'ลงค่าใช้จ่าย'}${ed?'<span class="live" style="background:var(--amber-soft);color:#8A6A22">กำลังแก้</span>':''}</h2>
     ${t.members.length<2 ? '<div class="empty">เพิ่มเพื่อนให้ครบอย่างน้อย 2 คนก่อน</div>' : `
     <div class="row">
-      <div style="grid-column:span 2"><label>รายการ</label><input id="eDesc" placeholder="เช่น ค่าที่พักคืนแรก"></div>
-      <div><label>สกุลเงิน</label><select id="eCur">${CODES.map(c=>`<option value="${c}"${c===t.base?' selected':''}>${CUR[c].sym} ${c}</option>`).join('')}</select></div>
-      <div><label>จำนวนเงิน</label><input id="eAmt" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0.00"></div>
-      <div><label>วันที่</label><input id="eDate" type="date" value="${today()}"></div>
-      <div><label>ใครออก</label><select id="ePayer">${t.members.map(m=>`<option value="${m.id}">${esc(m.name)}</option>`).join('')}</select></div>
+      <div style="grid-column:span 2"><label>รายการ</label><input id="eDesc" placeholder="เช่น ค่าที่พักคืนแรก" value="${ed?esc(ed.desc):''}"></div>
+      <div><label>สกุลเงิน</label><select id="eCur">${CODES.map(c=>`<option value="${c}"${c===(ed?ed.cur:t.base)?' selected':''}>${CUR[c].sym} ${c}</option>`).join('')}</select></div>
+      <div><label>จำนวนเงิน</label><input id="eAmt" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0.00" value="${ed?ed.amount:''}"></div>
+      <div><label>วันที่</label><input id="eDate" type="date" value="${ed?ed.date:today()}"></div>
+      <div><label>ใครออก</label><select id="ePayer">${t.members.map(m=>`<option value="${m.id}"${ed&&ed.payer===m.id?' selected':''}>${esc(m.name)}</option>`).join('')}</select></div>
     </div>
     <label style="margin-top:1rem">หารกับใคร</label>
-    <div class="split">${t.members.map(m=>`<label><input type="checkbox" value="${m.id}" checked>${esc(m.name)}</label>`).join('')}</div>
-    <div style="margin-top:1rem"><button onclick="addExpense()">บันทึกรายการ</button></div>`}
+    <div class="split">${t.members.map(m=>`<label><input type="checkbox" value="${m.id}"${!ed||ed.among.includes(m.id)?' checked':''}>${esc(m.name)}</label>`).join('')}</div>
+    <div style="margin-top:1rem;display:flex;gap:.5rem;flex-wrap:wrap">
+      <button onclick="addExpense()">${ed?'บันทึกการแก้ไข':'บันทึกรายการ'}</button>
+      ${ed?'<button class="ghost" onclick="cancelEdit()">ยกเลิก</button>':''}</div>`}
 
     <details style="margin-top:1.2rem"${usedCur(t).length?' open':''}>
       <summary>อัตราแลกเปลี่ยน — สรุปทุกอย่างเป็น ${t.base}</summary>
@@ -570,7 +583,8 @@ function render(){
         <td>${who(name(e.payer))}</td>
         <td class="hidemob" style="color:var(--muted);font-size:.9rem">${e.among.length===t.members.length?'ทุกคน':esc(e.among.map(name).join(', '))} · คนละ ${money(base/e.among.length,t.base)}</td>
         <td class="num">${num(base,2)}${e.cur!==t.base?`<span class="orig">${money(e.amount,e.cur)} ${e.cur}</span>`:''}</td>
-        <td><button class="link" onclick="removeExpense('${e.id}')">ลบ</button></td></tr>`;}).join('')}
+        <td style="white-space:nowrap"><button class="ghost small" style="padding:.25rem .55rem" onclick="startEdit('${e.id}')">แก้</button>
+          <button class="link" onclick="removeExpense('${e.id}')">ลบ</button></td></tr>`;}).join('')}
       </tbody></table></div>` : '<div class="empty">ยังไม่มีรายการ ลงรายการแรกด้านบนได้เลย</div>'}
   </section>
 
