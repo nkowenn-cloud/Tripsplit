@@ -124,7 +124,7 @@
 <header><div class="wrap">
   <div>
     <h1>TripSplit</h1>
-    <p>ลงว่าใครออกเท่าไร แล้วให้มันหารให้ตอนจบทริป</p>
+    <p>ลงว่าใครออกเท่าไร แล้วให้มันหารให้ตอนจบทริป <span style="opacity:.6">· v7 (มี ₫ VND)</span></p>
   </div>
   <div class="tools">
     <button onclick="exportCSV()">รายการ CSV</button>
@@ -146,6 +146,14 @@
       <div class="go"><button onclick="addTrip()">สร้างทริป</button></div>
     </div>
     <div class="trips" id="trips" style="margin-top:1rem"></div>
+    <details style="margin-top:1rem">
+      <summary>เข้าทริปที่เพื่อนแชร์มา (วางลิงก์หรือรหัสทริป)</summary>
+      <div class="row" style="margin-top:.8rem">
+        <div style="grid-column:span 2"><input id="joinCode" placeholder="วางลิงก์ทั้งอัน หรือรหัส 22 ตัว" onkeydown="if(event.key==='Enter')joinByCode()"></div>
+        <div class="go"><button onclick="joinByCode()">เข้าทริป</button></div>
+      </div>
+      <p class="hint">ทริปที่ซิงค์ไว้จะไม่ขึ้นเองในเบราว์เซอร์ใหม่ ต้องเข้าด้วยลิงก์หรือรหัสครั้งแรกครั้งเดียว จากนั้นจำได้เอง · รหัสทริปดูได้จากปุ่ม “ชวนเพื่อน”</p>
+    </details>
   </section>
   <div id="tripArea" style="display:contents"></div>
 </main>
@@ -388,6 +396,12 @@ function joinTrip(id){
   }
   state.current=id; persist(); subscribe(); render(); $('banner').innerHTML='';
 }
+function joinByCode(){
+  const raw=$('joinCode').value.trim(); if(!raw) return;
+  const m=raw.match(/#j=([\w-]+)/) || raw.match(/^([A-Za-z0-9_-]{20,})$/);
+  if(!m) return alert('ไม่เจอรหัสทริปในข้อความนี้ ต้องเป็นลิงก์ที่มี #j= หรือรหัส 22 ตัว');
+  $('joinCode').value=''; joinTrip(m[1]);
+}
 function leaveTrip(id){
   if(!confirm('เอาทริปนี้ออกจากเครื่องนี้? (ข้อมูลบนคลาวด์ยังอยู่ เพื่อนยังใช้ได้ และกลับเข้าได้ด้วยลิงก์เดิม)')) return;
   state.trips=state.trips.filter(x=>x.id!==id);
@@ -435,6 +449,7 @@ function renderShare(link,live){
     <div class="linkbox"><input value="${esc(link)}" readonly onclick="this.select()">
       <button onclick="navigator.clipboard.writeText(this.previousElementSibling.value);this.textContent='คัดลอกแล้ว'">คัดลอก</button>
       <button class="ghost" onclick="$('banner').innerHTML=''">ปิด</button></div>
+    ${live?`<p class="hint" style="margin-top:.5rem">รหัสทริป: <b style="font-family:monospace">${esc(link.split('#j=')[1])}</b> — พิมพ์รหัสนี้ในช่อง “เข้าทริปที่เพื่อนแชร์มา” ก็เข้าได้เหมือนกัน</p>`:''}
     <p class="hint">${live?'ใครมีลิงก์นี้ก็เข้าดูและแก้ทริปได้ ส่งเฉพาะคนที่ไปด้วยกันนะ'
       :'ลิงก์นี้เป็นภาพนิ่ง ณ ตอนนี้ ถ้าลงรายการเพิ่มต้องกดแชร์ใหม่'}</p>
   </div></div>`;
